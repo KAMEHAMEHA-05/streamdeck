@@ -18,7 +18,6 @@ const BUCKET = process.env.REACT_APP_AWS_BUCKET;
 
 export default function App() {
   const [folders, setFolders] = useState([]);
-  const [files, setFiles] = useState([]);
   const [videoUrl, setVideoUrl] = useState("");
 
   useEffect(() => {
@@ -40,7 +39,7 @@ export default function App() {
     setFolders(names);
   }
 
-  async function loadFiles(folder) {
+  async function loadVideo(folder) {
     const result = await s3.send(
       new ListObjectsV2Command({
         Bucket: BUCKET,
@@ -48,62 +47,65 @@ export default function App() {
       })
     );
 
-    const list = (result.Contents || [])
+    const videoFile = (result.Contents || [])
       .map((o) => o.Key)
-      .filter((k) =>
+      .find((k) =>
         k.match(/\.(mp4|mkv|mov|avi|webm|mp3|m4v)$/i)
       );
 
-    setFiles(list);
-  }
+    if (videoFile) {
+      const url = await getSignedUrl(
+        s3,
+        new GetObjectCommand({
+          Bucket: BUCKET,
+          Key: videoFile,
+        }),
+        { expiresIn: 3600 }
+      );
 
-  async function play(key) {
-    const url = await getSignedUrl(
-      s3,
-      new GetObjectCommand({
-        Bucket: BUCKET,
-        Key: key,
-      }),
-      { expiresIn: 3600 }
-    );
-
-    setVideoUrl(url);
+      setVideoUrl(url);
+    }
   }
 
   return (
-    <div
-      style={{
-        background: "#0d0d0d",
-        color: "#e6e6e6",
-        minHeight: "100vh",
-        padding: "40px",
-        fontFamily: "Inter, sans-serif",
-      }}
-    >
-      <h1 style={{ fontWeight: 500, marginBottom: 30 }}>Video Library</h1>
+    <>
+      <style>
+        {`@import url('https://fonts.googleapis.com/css2?family=Merriweather:ital,opsz,wght@0,18..144,300..900;1,18..144,300..900&family=Montserrat:ital,wght@0,100..900;1,100..900&display=swap');`}
+      </style>
+      <div
+        style={{
+          background: "#0d0d0d",
+          color: "#e6e6e6",
+          minHeight: "100vh",
+          padding: "40px",
+          fontFamily: "'Montserrat', sans-serif",
+        }}
+      >
+        <h1 style={{ fontWeight: 500, marginBottom: 30 }}>Ishaan's StreamDeck</h1>
 
-      {videoUrl && (
-        <video
-          src={videoUrl}
-          controls
-          style={{
-            width: "100%",
-            marginBottom: 30,
-            borderRadius: 8,
-            background: "#000",
-          }}
-        />
-      )}
+        {videoUrl && (
+          <video
+            src={videoUrl}
+            controls
+            style={{
+              width: "100%",
+              marginBottom: 30,
+              borderRadius: 8,
+              background: "#000",
+            }}
+          />
+        )}
 
-      <div style={{ display: "flex", gap: 60 }}>
-        <div style={{ width: "30%" }}>
+        <div>
           <h2 style={{ marginBottom: 15 }}>Folders</h2>
-          <div style={{ opacity: 0.8, fontSize: 14 }}>Click to open</div>
+          <div style={{ opacity: 0.8, fontSize: 14, marginBottom: 20 }}>
+            Click to play video
+          </div>
 
           {folders.map((f) => (
             <div
               key={f}
-              onClick={() => loadFiles(f)}
+              onClick={() => loadVideo(f)}
               style={{
                 padding: "12px 0",
                 borderBottom: "1px solid #222",
@@ -115,25 +117,7 @@ export default function App() {
             </div>
           ))}
         </div>
-
-        <div style={{ width: "70%" }}>
-          <h2 style={{ marginBottom: 15 }}>Files</h2>
-
-          {files.map((file) => (
-            <div
-              key={file}
-              onClick={() => play(file)}
-              style={{
-                padding: "10px 0",
-                borderBottom: "1px solid #222",
-                cursor: "pointer",
-              }}
-            >
-              {file.split("/").slice(-1)}
-            </div>
-          ))}
-        </div>
       </div>
-    </div>
+    </>
   );
 }
