@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import {
   S3Client,
   ListObjectsV2Command,
@@ -19,10 +19,19 @@ const BUCKET = process.env.REACT_APP_AWS_BUCKET;
 export default function App() {
   const [folders, setFolders] = useState([]);
   const [videoUrl, setVideoUrl] = useState("");
+  const [subtitleUrl, setSubtitleUrl] = useState("");
+  const [showSubtitles, setShowSubtitles] = useState(true);
+  const videoRef = useRef(null);
 
   useEffect(() => {
     loadFolders();
   }, []);
+
+  useEffect(() => {
+    if (videoRef.current && videoRef.current.textTracks.length > 0) {
+      videoRef.current.textTracks[0].mode = showSubtitles ? "showing" : "hidden";
+    }
+  }, [showSubtitles, subtitleUrl]);
 
   async function loadFolders() {
     const result = await s3.send(
@@ -47,11 +56,13 @@ export default function App() {
       })
     );
 
-    const videoFile = (result.Contents || [])
-      .map((o) => o.Key)
-      .find((k) =>
-        k.match(/\.(mp4|mkv|mov|avi|webm|mp3|m4v)$/i)
-      );
+    const files = (result.Contents || []).map((o) => o.Key);
+    
+    const videoFile = files.find((k) =>
+      k.match(/\.(mp4|mkv|mov|avi|webm|mp3|m4v)$/i)
+    );
+
+    const srtFile = files.find((k) => k.match(/\.vtt$/i));
 
     if (videoFile) {
       const url = await getSignedUrl(
@@ -64,6 +75,21 @@ export default function App() {
       );
 
       setVideoUrl(url);
+    }
+
+    if (srtFile) {
+      const url = await getSignedUrl(
+        s3,
+        new GetObjectCommand({
+          Bucket: BUCKET,
+          Key: srtFile,
+        }),
+        { expiresIn: 3600 }
+      );
+
+      setSubtitleUrl(url);
+    } else {
+      setSubtitleUrl("");
     }
   }
 
@@ -98,17 +124,60 @@ export default function App() {
             border: "1px solid rgba(255, 255, 255, 0.08)",
             borderRadius: 16,
             padding: 16,
+            position: "relative",
           }}>
             <video
+              ref={videoRef}
               src={videoUrl}
               controls
+              crossOrigin="anonymous"
               style={{
                 width: "100%",
                 borderRadius: 12,
                 background: "#000",
                 display: "block",
               }}
-            />
+            >
+              {subtitleUrl && (
+                <track
+                    key={subtitleUrl}
+                    kind="subtitles"
+                    src={subtitleUrl}
+                    srcLang="en"
+                    label="English"
+                    default
+                    />
+              )}
+            </video>
+            
+            {subtitleUrl && (
+              <button
+                onClick={() => setShowSubtitles(!showSubtitles)}
+                style={{
+                  position: "absolute",
+                  top: 28,
+                  right: 28,
+                  background: showSubtitles ? "rgba(255, 215, 0, 0.9)" : "rgba(0, 0, 0, 0.7)",
+                  color: showSubtitles ? "#000" : "#fff",
+                  border: "1px solid rgba(255, 255, 255, 0.2)",
+                  borderRadius: 8,
+                  padding: "10px 16px",
+                  cursor: "pointer",
+                  fontFamily: "'Montserrat', sans-serif",
+                  fontWeight: 600,
+                  fontSize: 14,
+                  transition: "all 0.2s ease",
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.transform = "scale(1.05)";
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.transform = "scale(1)";
+                }}
+              >
+                {showSubtitles ? "CC ON" : "CC OFF"}
+              </button>
+            )}
           </div>
         )}
 
