@@ -1,3 +1,5 @@
+//workers/streamdeck-worker.js
+
 export class PartyDO {
   constructor(state, env) {
     this.state = state;
