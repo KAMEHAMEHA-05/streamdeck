@@ -68,7 +68,7 @@ export default async function handler(req) {
       JSON.stringify({ main_module: "worker.js" })
     ], { type: "application/json" }), "metadata.json");
 
-    form1.append("script", new Blob([workerCode], {
+    form1.append("worker.js", new Blob([workerCode], {
       type: "application/javascript"
     }), "worker.js");
 
@@ -114,7 +114,7 @@ export default async function handler(req) {
       JSON.stringify(metadata)
     ], { type: "application/json" }), "metadata.json");
 
-    form2.append("script", new Blob([workerCode], {
+    form2.append("worker.js", new Blob([workerCode], {
       type: "application/javascript"
     }), "worker.js");
 
