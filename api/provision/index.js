@@ -53,8 +53,12 @@ export default async function handler(req) {
     // ----------------------------------
     // 3. LOAD WORKER CODE
     // ----------------------------------
-    const workerFile = await fetch(`${req.nextUrl.origin}/workers/streamdeck-worker.js`);
+    const url = new URL(req.url);
+    const origin = `${url.protocol}//${url.host}`;
+
+    const workerFile = await fetch(`${origin}/workers/streamdeck-worker.js`);
     const workerCode = await workerFile.text();
+
 
     // ----------------------------------
     // 4. FIRST DEPLOY (WITHOUT BINDINGS)
