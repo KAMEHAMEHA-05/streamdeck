@@ -1,6 +1,7 @@
 {
   "functions": {
     "api/provision/index.js": {
+        "maxDuration": 30
     }
   },
   "rewrites": [
