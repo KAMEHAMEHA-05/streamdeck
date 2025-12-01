@@ -1,7 +1,6 @@
 {
   "functions": {
     "api/provision/index.js": {
-      "runtime": "node@18"
     }
   },
   "rewrites": [
