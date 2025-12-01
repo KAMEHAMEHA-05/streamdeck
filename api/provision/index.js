@@ -56,7 +56,7 @@ export default async function handler(req) {
     const url = new URL(req.url);
     const origin = `${url.protocol}//${url.host}`;
 
-    const workerFile = await fetch(`${origin}/workers/streamdeck-worker.js`);
+    const workerFile = await fetch(`${origin}/streamdeck-worker.js`);
     const workerCode = await workerFile.text();
 
 
