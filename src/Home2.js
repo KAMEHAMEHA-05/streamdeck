@@ -267,7 +267,30 @@ export default function App() {
   return (
     <>
       <style>
-        {`@import url('https://fonts.googleapis.com/css2?family=Merriweather:ital,opsz,wght@0,18..144,300..900;1,18..144,300..900&family=Montserrat:ital,wght@0,100..900;1,100..900&display=swap');`}
+        {`
+          @import url('https://fonts.googleapis.com/css2?family=Merriweather:ital,opsz,wght@0,18..144,300..900;1,18..144,300..900&family=Montserrat:ital,wght@0,100..900;1,100..900&display=swap');
+          
+          @font-face {
+            font-family: 'CustomTitle';
+            src: url('/ClashDisplay-Variable.ttf') format('truetype');
+            font-weight: normal;
+            font-style: normal;
+          }
+          
+          .title-solid {
+            font-family: 'CustomTitle', 'Montserrat', sans-serif;
+            -webkit-text-fill-color: #ffbb00ff;
+            color: #ffbb00ff;
+          }
+          
+          .title-outline {
+            font-family: 'CustomTitle', 'Montserrat', sans-serif;
+            -webkit-text-fill-color: transparent;
+            -webkit-text-stroke: 2px #ffbb00ff;
+            color: transparent;
+            text-stroke: 2px #ffbb00ff;
+          }
+        `}
       </style>
       <div
         style={{
@@ -284,8 +307,9 @@ export default function App() {
         }}
       >
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 40 }}>
-          <h1 style={{ fontWeight: 600, margin: 0, color: "#ffd700", fontSize: 36 }}>
-            Ishaan's StreamDeck
+          <h1 style={{ fontWeight: 1200, margin: 0, fontSize: 70, display: "flex" }}>
+            <span className="title-solid">STREAM</span>
+            <span className="title-outline">DECK</span>
           </h1>
           
           {!partyCode ? (
@@ -299,10 +323,10 @@ export default function App() {
                 padding: "12px 24px",
                 cursor: "pointer",
                 fontFamily: "'Montserrat', sans-serif",
-                fontWeight: 550,
+                fontWeight: 700,
                 fontSize: 16,
                 transition: "all 0.3s ease",
-                //boxShadow: "0 4px 15px rgba(255, 215, 0, 0.3)",
+                boxShadow: "0 4px 15px rgba(255, 215, 0, 0.3)",
               }}
               onMouseEnter={(e) => {
                 e.currentTarget.style.transform = "translateY(-2px)";
@@ -324,7 +348,7 @@ export default function App() {
               fontFamily: "'Montserrat', sans-serif",
               fontWeight: 700,
               fontSize: 16,
-              color: "#eda008ff",
+              color: "#ffae00ff",
             }}>
               Party Code: {partyCode}
             </div>
