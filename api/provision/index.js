@@ -81,7 +81,9 @@ export default async function handler(req) {
     const boundary = "----streamdeckBoundary" + Math.random();
 
     const metadata1 = JSON.stringify({
-    main_module: "worker.js"
+        main_module: "worker.js",
+        compatibility_date: "2024-01-01",  // Add this
+        compatibility_flags: ["nodejs_compat"]  // Optional, but recommended
     });
 
     const uploadBody1 = buildMultipart(boundary, [
@@ -94,7 +96,7 @@ export default async function handler(req) {
     {
         name: "worker.js",
         filename: "worker.js",
-        type: "application/javascript",
+        type: "application/javascript+module",
         content: workerCode
     }
     ]);
@@ -132,12 +134,14 @@ export default async function handler(req) {
     // 6. REDEPLOY WORKER WITH BINDINGS
     // ----------------------------------
     const metadata2 = JSON.stringify({
-    main_module: "worker.js",
-    bindings: [
-        { name: "MEDIA_BUCKET", type: "r2_bucket", bucket_name: bucketName },
-        { name: "DB", type: "d1", id: d1Id },
-        { name: "PARTY", type: "durable_object_namespace", namespace_id: doNamespaceId }
-    ]
+        main_module: "worker.js",
+        compatibility_date: "2024-01-01",  // Add this
+        compatibility_flags: ["nodejs_compat"],  // Optional
+        bindings: [
+            { name: "MEDIA_BUCKET", type: "r2_bucket", bucket_name: bucketName },
+            { name: "DB", type: "d1", id: d1Id },
+            { name: "PARTY", type: "durable_object_namespace", namespace_id: doNamespaceId }
+        ]
     });
 
     const uploadBody2 = buildMultipart(boundary, [
@@ -150,7 +154,7 @@ export default async function handler(req) {
     {
         name: "worker.js",
         filename: "worker.js",
-        type: "application/javascript",
+        type: "application/javascript+module",
         content: workerCode
     }
     ]);
