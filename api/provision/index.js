@@ -47,7 +47,6 @@ export default async function handler(req) {
     const bucketName = "streamdeck-media";
     const dbName = "streamdeck-db";
     const workerName = "streamdeck-worker";
-    const doNamespaceName = "streamdeck-party";
 
     // ----------------------------------
     // 1. CREATE R2 BUCKET
@@ -75,85 +74,30 @@ export default async function handler(req) {
     const workerCode = await workerFile.text();
 
     // ----------------------------------
-    // 4. FIRST DEPLOY (WITHOUT BINDINGS)
+    // 4. DEPLOY WORKER WITH MIGRATION
     // ----------------------------------
     const boundary = "----streamdeckBoundary" + Math.random();
 
-    const metadata1 = JSON.stringify({
-      main_module: "worker.js",
-      compatibility_date: "2024-01-01",
-      compatibility_flags: ["nodejs_compat"]
-    });
-
-    const uploadBody1 = buildMultipart(boundary, [
-      {
-        name: "metadata",
-        filename: "metadata.json",
-        type: "application/json",
-        content: metadata1
-      },
-      {
-        name: "worker.js",
-        filename: "worker.js",
-        type: "application/javascript+module",
-        content: workerCode
-      }
-    ]);
-
-    const up1 = await fetch(
-      `${CF}/accounts/${accountId}/workers/scripts/${workerName}`,
-      {
-        method: "PUT",
-        headers: {
-          "Authorization": `Bearer ${apiToken}`,
-          "Content-Type": `multipart/form-data; boundary=${boundary}`
-        },
-        body: uploadBody1
-      }
-    );
-
-    const up1Json = await up1.json();
-    if (!up1Json.success) throw new Error(JSON.stringify(up1Json.errors));
-
-    // ----------------------------------
-    // 5. NOW CREATE DURABLE OBJECT NAMESPACE
-    // ----------------------------------
-    const doNS = await cfApi(apiToken, "POST",
-      `${CF}/accounts/${accountId}/workers/durable_objects/namespaces`,
-      {
-        name: doNamespaceName,
-        script: workerName,
-        class_name: "PartyDO"
-      }
-    );
-
-    const doNamespaceId = doNS.id;
-
-    // ----------------------------------
-    // 6. REDEPLOY WORKER WITH BINDINGS
-    // ----------------------------------
-    const metadata2 = JSON.stringify({
+    const metadata = JSON.stringify({
       main_module: "worker.js",
       compatibility_date: "2024-01-01",
       compatibility_flags: ["nodejs_compat"],
       bindings: [
         { name: "MEDIA_BUCKET", type: "r2_bucket", bucket_name: bucketName },
-        { name: "DB", type: "d1", id: d1Id },
-        { 
-          name: "PARTY", 
-          type: "durable_object_namespace", 
-          namespace_id: doNamespaceId,
-          class_name: "PartyDO"
-        }
-      ]
+        { name: "DB", type: "d1", id: d1Id }
+      ],
+      migrations: {
+        new_tag: "v1",
+        new_sqlite_classes: ["PartyDO"]
+      }
     });
 
-    const uploadBody2 = buildMultipart(boundary, [
+    const uploadBody = buildMultipart(boundary, [
       {
         name: "metadata",
         filename: "metadata.json",
         type: "application/json",
-        content: metadata2
+        content: metadata
       },
       {
         name: "worker.js",
@@ -163,7 +107,7 @@ export default async function handler(req) {
       }
     ]);
 
-    const up2 = await fetch(
+    const uploadRes = await fetch(
       `${CF}/accounts/${accountId}/workers/scripts/${workerName}`,
       {
         method: "PUT",
@@ -171,12 +115,12 @@ export default async function handler(req) {
           "Authorization": `Bearer ${apiToken}`,
           "Content-Type": `multipart/form-data; boundary=${boundary}`
         },
-        body: uploadBody2
+        body: uploadBody
       }
     );
 
-    const up2Json = await up2.json();
-    if (!up2Json.success) throw new Error(JSON.stringify(up2Json.errors));
+    const uploadJson = await uploadRes.json();
+    if (!uploadJson.success) throw new Error(JSON.stringify(uploadJson.errors));
 
     return new Response(
       JSON.stringify({
@@ -184,8 +128,7 @@ export default async function handler(req) {
         workerUrl: `https://${workerName}.${accountId}.workers.dev`,
         bucketName,
         dbName,
-        d1Id,
-        doNamespaceId
+        d1Id
       }),
       { status: 200 }
     );
