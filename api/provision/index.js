@@ -41,6 +41,21 @@ export default async function handler(req) {
       `${CF}/accounts/${accountId}/r2/buckets/${bucketName}`
     );
 
+    function buildMultipart(boundary, parts) {
+        let body = "";
+
+        for (const p of parts) {
+            body += `--${boundary}\r\n`;
+            body += `Content-Disposition: form-data; name="${p.name}"; filename="${p.filename}"\r\n`;
+            body += `Content-Type: ${p.type}\r\n\r\n`;
+            body += p.content + "\r\n";
+        }
+
+        body += `--${boundary}--`;
+
+        return body;
+        }
+
     // ----------------------------------
     // 2. CREATE D1 DATABASE
     // ----------------------------------
@@ -63,23 +78,39 @@ export default async function handler(req) {
     // ----------------------------------
     // 4. FIRST DEPLOY (WITHOUT BINDINGS)
     // ----------------------------------
-    const form1 = new FormData();
-    form1.append("metadata", new Blob([
-      JSON.stringify({ main_module: "worker.js" })
-    ], { type: "application/json" }), "metadata.json");
+    const boundary = "----streamdeckBoundary" + Math.random();
 
-    form1.append("worker.js", new Blob([workerCode], {
-      type: "application/javascript"
-    }), "worker.js");
+    const metadata1 = JSON.stringify({
+    main_module: "worker.js"
+    });
+
+    const uploadBody1 = buildMultipart(boundary, [
+    {
+        name: "metadata",
+        filename: "metadata.json",
+        type: "application/json",
+        content: metadata1
+    },
+    {
+        name: "worker.js",
+        filename: "worker.js",
+        type: "application/javascript",
+        content: workerCode
+    }
+    ]);
 
     const up1 = await fetch(
-      `${CF}/accounts/${accountId}/workers/scripts/${workerName}`,
-      {
+    `${CF}/accounts/${accountId}/workers/scripts/${workerName}`,
+    {
         method: "PUT",
-        headers: { "Authorization": `Bearer ${apiToken}` },
-        body: form1
-      }
+        headers: {
+        "Authorization": `Bearer ${apiToken}`,
+        "Content-Type": `multipart/form-data; boundary=${boundary}`
+        },
+        body: uploadBody1
+    }
     );
+
     const up1Json = await up1.json();
     if (!up1Json.success) throw new Error(JSON.stringify(up1Json.errors));
 
@@ -100,32 +131,42 @@ export default async function handler(req) {
     // ----------------------------------
     // 6. REDEPLOY WORKER WITH BINDINGS
     // ----------------------------------
-    const metadata = {
-      main_module: "worker.js",
-      bindings: [
+    const metadata2 = JSON.stringify({
+    main_module: "worker.js",
+    bindings: [
         { name: "MEDIA_BUCKET", type: "r2_bucket", bucket_name: bucketName },
         { name: "DB", type: "d1", id: d1Id },
         { name: "PARTY", type: "durable_object_namespace", namespace_id: doNamespaceId }
-      ]
-    };
+    ]
+    });
 
-    const form2 = new FormData();
-    form2.append("metadata", new Blob([
-      JSON.stringify(metadata)
-    ], { type: "application/json" }), "metadata.json");
-
-    form2.append("worker.js", new Blob([workerCode], {
-      type: "application/javascript"
-    }), "worker.js");
+    const uploadBody2 = buildMultipart(boundary, [
+    {
+        name: "metadata",
+        filename: "metadata.json",
+        type: "application/json",
+        content: metadata2
+    },
+    {
+        name: "worker.js",
+        filename: "worker.js",
+        type: "application/javascript",
+        content: workerCode
+    }
+    ]);
 
     const up2 = await fetch(
-      `${CF}/accounts/${accountId}/workers/scripts/${workerName}`,
-      {
+    `${CF}/accounts/${accountId}/workers/scripts/${workerName}`,
+    {
         method: "PUT",
-        headers: { "Authorization": `Bearer ${apiToken}` },
-        body: form2
-      }
+        headers: {
+        "Authorization": `Bearer ${apiToken}`,
+        "Content-Type": `multipart/form-data; boundary=${boundary}`
+        },
+        body: uploadBody2
+    }
     );
+
     const up2Json = await up2.json();
     if (!up2Json.success) throw new Error(JSON.stringify(up2Json.errors));
 
