@@ -22,6 +22,21 @@ async function cfApi(apiToken, method, url, body) {
   return json.result;
 }
 
+function buildMultipart(boundary, parts) {
+  let body = "";
+
+  for (const p of parts) {
+    body += `--${boundary}\r\n`;
+    body += `Content-Disposition: form-data; name="${p.name}"; filename="${p.filename}"\r\n`;
+    body += `Content-Type: ${p.type}\r\n\r\n`;
+    body += p.content + "\r\n";
+  }
+
+  body += `--${boundary}--`;
+
+  return body;
+}
+
 export default async function handler(req) {
   try {
     const { accountId, apiToken } = await req.json();
@@ -41,21 +56,6 @@ export default async function handler(req) {
       `${CF}/accounts/${accountId}/r2/buckets/${bucketName}`
     );
 
-    function buildMultipart(boundary, parts) {
-        let body = "";
-
-        for (const p of parts) {
-            body += `--${boundary}\r\n`;
-            body += `Content-Disposition: form-data; name="${p.name}"; filename="${p.filename}"\r\n`;
-            body += `Content-Type: ${p.type}\r\n\r\n`;
-            body += p.content + "\r\n";
-        }
-
-        body += `--${boundary}--`;
-
-        return body;
-        }
-
     // ----------------------------------
     // 2. CREATE D1 DATABASE
     // ----------------------------------
@@ -74,43 +74,42 @@ export default async function handler(req) {
     const workerFile = await fetch(`${origin}/streamdeck-worker.js`);
     const workerCode = await workerFile.text();
 
-
     // ----------------------------------
     // 4. FIRST DEPLOY (WITHOUT BINDINGS)
     // ----------------------------------
     const boundary = "----streamdeckBoundary" + Math.random();
 
     const metadata1 = JSON.stringify({
-        main_module: "worker.js",
-        compatibility_date: "2024-01-01",  // Add this
-        compatibility_flags: ["nodejs_compat"]  // Optional, but recommended
+      main_module: "worker.js",
+      compatibility_date: "2024-01-01",
+      compatibility_flags: ["nodejs_compat"]
     });
 
     const uploadBody1 = buildMultipart(boundary, [
-    {
+      {
         name: "metadata",
         filename: "metadata.json",
         type: "application/json",
         content: metadata1
-    },
-    {
+      },
+      {
         name: "worker.js",
         filename: "worker.js",
         type: "application/javascript+module",
         content: workerCode
-    }
+      }
     ]);
 
     const up1 = await fetch(
-    `${CF}/accounts/${accountId}/workers/scripts/${workerName}`,
-    {
+      `${CF}/accounts/${accountId}/workers/scripts/${workerName}`,
+      {
         method: "PUT",
         headers: {
-        "Authorization": `Bearer ${apiToken}`,
-        "Content-Type": `multipart/form-data; boundary=${boundary}`
+          "Authorization": `Bearer ${apiToken}`,
+          "Content-Type": `multipart/form-data; boundary=${boundary}`
         },
         body: uploadBody1
-    }
+      }
     );
 
     const up1Json = await up1.json();
@@ -134,41 +133,46 @@ export default async function handler(req) {
     // 6. REDEPLOY WORKER WITH BINDINGS
     // ----------------------------------
     const metadata2 = JSON.stringify({
-        main_module: "worker.js",
-        compatibility_date: "2024-01-01",  // Add this
-        compatibility_flags: ["nodejs_compat"],  // Optional
-        bindings: [
-            { name: "MEDIA_BUCKET", type: "r2_bucket", bucket_name: bucketName },
-            { name: "DB", type: "d1", id: d1Id },
-            { name: "PARTY", type: "durable_object_namespace", namespace_id: doNamespaceId }
-        ]
+      main_module: "worker.js",
+      compatibility_date: "2024-01-01",
+      compatibility_flags: ["nodejs_compat"],
+      bindings: [
+        { name: "MEDIA_BUCKET", type: "r2_bucket", bucket_name: bucketName },
+        { name: "DB", type: "d1", id: d1Id },
+        { 
+          name: "PARTY", 
+          type: "durable_object_namespace", 
+          namespace_id: doNamespaceId,
+          class_name: "PartyDO"
+        }
+      ]
     });
 
     const uploadBody2 = buildMultipart(boundary, [
-    {
+      {
         name: "metadata",
         filename: "metadata.json",
         type: "application/json",
         content: metadata2
-    },
-    {
+      },
+      {
         name: "worker.js",
         filename: "worker.js",
         type: "application/javascript+module",
         content: workerCode
-    }
+      }
     ]);
 
     const up2 = await fetch(
-    `${CF}/accounts/${accountId}/workers/scripts/${workerName}`,
-    {
+      `${CF}/accounts/${accountId}/workers/scripts/${workerName}`,
+      {
         method: "PUT",
         headers: {
-        "Authorization": `Bearer ${apiToken}`,
-        "Content-Type": `multipart/form-data; boundary=${boundary}`
+          "Authorization": `Bearer ${apiToken}`,
+          "Content-Type": `multipart/form-data; boundary=${boundary}`
         },
         body: uploadBody2
-    }
+      }
     );
 
     const up2Json = await up2.json();
