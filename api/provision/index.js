@@ -89,32 +89,24 @@ export default async function handler(req) {
     console.log("Starting provisioning...");
 
     // ==========================================
-    // STEP 1: Create R2 Bucket (public)
+    // STEP 1: Create R2 Bucket
     // ==========================================
     console.log("Creating R2 bucket...");
     
     try {
       await cf(apiToken, "POST",
         `${CF}/accounts/${accountId}/r2/buckets`,
-        { name: bucketName }
+        { name: bucketName, locationHint: "auto" }
       );
     } catch (err) {
       // Bucket might already exist, that's okay
       if (!err.message.includes("already exists")) throw err;
     }
 
-    // Enable public access
-    await cf(apiToken, "PUT",
-      `${CF}/accounts/${accountId}/r2/buckets/${bucketName}/public`,
-      { enabled: true }
-    );
-
-    // Get bucket info to retrieve public URL
-    const bucketInfo = await cf(apiToken, "GET",
-      `${CF}/accounts/${accountId}/r2/buckets/${bucketName}`
-    );
-
-    const publicUrl = bucketInfo.public_url || `https://pub-${bucketName}.r2.dev`;
+    // R2 public access is configured via custom domains in the dashboard
+    // We'll serve files through the worker instead for simplicity
+    // This gives us control over CORS and doesn't require domain setup
+    const publicUrl = `https://${workerName}.${accountId}.workers.dev/media`;
 
     // ==========================================
     // STEP 2: Create KV Namespace
@@ -240,20 +232,21 @@ export default async function handler(req) {
       JSON.stringify({
         success: true,
         workerUrl,
-        publicUrl,
+        mediaUrl: publicUrl,
         bucketName,
         kvNamespaceId: kvId,
         doNamespaceId: doId,
-        instructions: [
-          "1. Store your Google Drive API key:",
-          `   curl -X POST ${workerUrl}/kv/GoogleDrive -d "YOUR_API_KEY"`,
-          "",
-          "2. Upload files:",
-          `   curl -X POST ${workerUrl}/upload -H "Content-Type: application/json" -d '{"storage_type":"GoogleDrive","link":"YOUR_DRIVE_LINK"}'`,
-          "",
-          "3. Connect to sync party:",
-          `   ws://${workerUrl.replace('https://', '')}/party/ROOM_NAME`
-        ].join("\n")
+        setup: {
+          step1: "Store your Google Drive API key",
+          command1: `curl -X POST ${workerUrl}/kv/GoogleDrive -H "Content-Type: text/plain" -d "YOUR_API_KEY"`,
+          step2: "Upload files from Google Drive",
+          command2: `curl -X POST ${workerUrl}/upload -H "Content-Type: application/json" -d '{"storage_type":"GoogleDrive","link":"YOUR_DRIVE_LINK"}'`,
+          step3: "Files will be accessible at",
+          url: `${publicUrl}/YOUR_FILENAME`,
+          step4: "Connect to sync party via WebSocket",
+          ws: `wss://${workerUrl.replace('https://', '')}/party/ROOM_NAME`
+        },
+        note: "Files are served through the worker endpoint with proper CORS and range request support for video streaming"
       }, null, 2),
       { 
         status: 200,

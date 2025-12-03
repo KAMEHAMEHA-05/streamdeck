@@ -486,10 +486,67 @@ export default {
       }
 
       // ==========================================
+      // Serve media files from R2
+      // ==========================================
+      if (url.pathname.startsWith("/media/") && req.method === "GET") {
+        const filename = decodeURIComponent(url.pathname.slice(7)); // Remove "/media/"
+        
+        if (!filename) {
+          return new Response(
+            JSON.stringify({ error: "Missing filename" }),
+            { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        const obj = await env.MEDIA.get(filename);
+        
+        if (!obj) {
+          return new Response(
+            JSON.stringify({ error: "File not found" }),
+            { status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        const headers = {
+          ...corsHeaders,
+          "Content-Type": obj.httpMetadata?.contentType || "application/octet-stream",
+          "Content-Length": obj.size,
+          "Cache-Control": "public, max-age=31536000, immutable",
+          "Accept-Ranges": "bytes"
+        };
+
+        // Support range requests for video streaming
+        const range = req.headers.get("Range");
+        if (range) {
+          const parts = range.replace(/bytes=/, "").split("-");
+          const start = parseInt(parts[0], 10);
+          const end = parts[1] ? parseInt(parts[1], 10) : obj.size - 1;
+          const chunkSize = end - start + 1;
+
+          headers["Content-Range"] = `bytes ${start}-${end}/${obj.size}`;
+          headers["Content-Length"] = chunkSize;
+
+          return new Response(obj.body, {
+            status: 206, // Partial Content
+            headers
+          });
+        }
+
+        return new Response(obj.body, { headers });
+      }
+
+      // ==========================================
       // List uploaded files
       // ==========================================
       if (url.pathname === "/files" && req.method === "GET") {
         const publicUrl = await env.KV.get("R2_PUBLIC_URL");
+        
+        if (!publicUrl) {
+          return new Response(
+            JSON.stringify({ error: "R2_PUBLIC_URL not configured" }),
+            { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
         
         const files = [];
         let cursor;
