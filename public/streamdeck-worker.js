@@ -30,7 +30,13 @@ export class PartyDO {
   broadcast(except) {
     const msg = JSON.stringify(this.stateData);
     for (const s of this.sessions) {
-      if (s !== except) s.send(msg);
+      if (s !== except) {
+        try {
+          s.send(msg);
+        } catch (err) {
+          console.error("Broadcast error:", err);
+        }
+      }
     }
   }
 
@@ -40,19 +46,39 @@ export class PartyDO {
       await this.init();
     }
 
+    const upgradeHeader = request.headers.get("Upgrade");
+    if (upgradeHeader !== "websocket") {
+      return new Response("Expected websocket", { status: 426 });
+    }
+
     const [client, server] = Object.values(new WebSocketPair());
     server.accept();
     this.sessions.push(server);
 
+    // Send current state immediately to new connection
+    try {
+      server.send(JSON.stringify(this.stateData));
+    } catch (err) {
+      console.error("Error sending initial state:", err);
+    }
+
     server.addEventListener("message", async evt => {
-      const data = JSON.parse(evt.data);
-      Object.assign(this.stateData, data);
-      await this.persist();
-      this.broadcast(server);
+      try {
+        const data = JSON.parse(evt.data);
+        Object.assign(this.stateData, data);
+        await this.persist();
+        this.broadcast(server);
+      } catch (err) {
+        console.error("Message error:", err);
+      }
     });
 
     server.addEventListener("close", () => {
       this.sessions = this.sessions.filter(s => s !== server);
+    });
+
+    server.addEventListener("error", err => {
+      console.error("WebSocket error:", err);
     });
 
     return new Response(null, { status: 101, webSocket: client });
@@ -60,69 +86,191 @@ export class PartyDO {
 }
 
 // ------------------------------
+// Constants
+// ------------------------------
+const MAX_BUCKET_SIZE = 10 * 1024 * 1024 * 1024; // 10GB
+const MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024; // 2GB per file (reasonable for streaming)
+
+// ------------------------------
 // Utilities
 // ------------------------------
-async function enforceQuota(bucket, maxBytes) {
-  let total = 0;
+async function enforceQuota(bucket, maxBytes, additionalSize = 0) {
+  let total = additionalSize;
   const items = [];
+  let cursor;
 
-  for await (const obj of bucket.list()) {
-    items.push(obj);
-    total += obj.size;
+  // Paginate through bucket list
+  do {
+    const listed = await bucket.list({ limit: 1000, cursor });
+    for (const obj of listed.objects) {
+      items.push(obj);
+      total += obj.size;
+    }
+    cursor = listed.truncated ? listed.cursor : undefined;
+  } while (cursor);
+
+  if (total <= maxBytes) {
+    return { success: true, deletedCount: 0, freedSpace: 0 };
   }
 
-  if (total <= maxBytes) return;
+  // Sort by upload time (oldest first)
+  items.sort((a, b) => a.uploaded.getTime() - b.uploaded.getTime());
 
-  items.sort((a, b) => a.uploaded - b.uploaded);
+  let deletedCount = 0;
+  let freedSpace = 0;
 
   for (const obj of items) {
     if (total <= maxBytes) break;
     await bucket.delete(obj.key);
     total -= obj.size;
+    freedSpace += obj.size;
+    deletedCount++;
   }
+
+  return { success: true, deletedCount, freedSpace };
 }
 
-// Extract file ID from Google Drive link
 function extractFileId(url) {
-  const m = url.match(/\/d\/([^/]+)/);
-  if (m) return m[1];
+  const patterns = [
+    /\/d\/([a-zA-Z0-9_-]+)/,
+    /id=([a-zA-Z0-9_-]+)/,
+    /^([a-zA-Z0-9_-]{25,})$/ // Direct file ID
+  ];
+  
+  for (const pattern of patterns) {
+    const m = url.match(pattern);
+    if (m) return m[1];
+  }
   return null;
 }
 
-// Extract folder ID from drive link
 function extractFolderId(url) {
-  const m = url.match(/\/folders\/([^/]+)/);
-  if (m) return m[1];
+  const patterns = [
+    /\/folders\/([a-zA-Z0-9_-]+)/,
+    /id=([a-zA-Z0-9_-]+)/
+  ];
+  
+  for (const pattern of patterns) {
+    const m = url.match(pattern);
+    if (m) return m[1];
+  }
   return null;
+}
+
+async function fetchWithRetry(url, retries = 3, headers = {}) {
+  for (let i = 0; i < retries; i++) {
+    try {
+      const res = await fetch(url, { headers });
+      
+      if (res.ok) return res;
+      
+      // Rate limited - exponential backoff
+      if (res.status === 429) {
+        const delay = Math.pow(2, i) * 1000;
+        console.log(`Rate limited, waiting ${delay}ms...`);
+        await new Promise(r => setTimeout(r, delay));
+        continue;
+      }
+      
+      // Other errors
+      const errorText = await res.text();
+      throw new Error(`HTTP ${res.status}: ${errorText}`);
+      
+    } catch (err) {
+      if (i === retries - 1) throw err;
+      
+      const delay = Math.pow(2, i) * 1000;
+      console.log(`Request failed, retrying in ${delay}ms...`);
+      await new Promise(r => setTimeout(r, delay));
+    }
+  }
+  
+  throw new Error("Max retries exceeded");
 }
 
 // ------------------------------
-// Download from Google Drive using API key from KV
+// Download from Google Drive
 // ------------------------------
 async function downloadFromGoogleDrive(apiKey, link) {
   const fileId = extractFileId(link);
   const folderId = extractFolderId(link);
 
   if (fileId) {
-    const url = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&key=${apiKey}`;
-    return [{ name: `${fileId}`, url }];
+    // Get file metadata first
+    const metaUrl = `https://www.googleapis.com/drive/v3/files/${fileId}?fields=name,size,mimeType&key=${apiKey}`;
+    
+    const metaRes = await fetchWithRetry(metaUrl);
+    const meta = await metaRes.json();
+    
+    if (!meta.name) {
+      throw new Error("Unable to access file. Make sure it's shared as 'Anyone with the link'");
+    }
+    
+    // Validate file size
+    const size = parseInt(meta.size, 10);
+    if (size > MAX_FILE_SIZE) {
+      throw new Error(
+        `File too large: ${(size / 1024 / 1024).toFixed(2)}MB ` +
+        `(max ${MAX_FILE_SIZE / 1024 / 1024}MB)`
+      );
+    }
+
+    const downloadUrl = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&key=${apiKey}`;
+    
+    return [{
+      name: meta.name,
+      url: downloadUrl,
+      size,
+      mimeType: meta.mimeType
+    }];
   }
 
   if (folderId) {
-    const listUrl =
-      `https://www.googleapis.com/drive/v3/files?q='${folderId}'+in+parents&key=${apiKey}&fields=files(id,name)`;
-
-    const res = await fetch(listUrl);
+    const listUrl = 
+      `https://www.googleapis.com/drive/v3/files?` +
+      `q='${folderId}'+in+parents+and+trashed=false&` +
+      `key=${apiKey}&` +
+      `fields=files(id,name,size,mimeType)&` +
+      `pageSize=1000`;
+    
+    const res = await fetchWithRetry(listUrl);
     const json = await res.json();
+    
+    if (!json.files || json.files.length === 0) {
+      throw new Error("No files found in folder or folder is not shared properly");
+    }
 
-    return json.files.map(f => ({
-      name: f.name,
-      url: `https://www.googleapis.com/drive/v3/files/${f.id}?alt=media&key=${apiKey}`
-    }));
+    // Filter and map files
+    const files = json.files
+      .filter(f => {
+        const size = parseInt(f.size, 10);
+        return size > 0 && size <= MAX_FILE_SIZE;
+      })
+      .map(f => ({
+        name: f.name,
+        url: `https://www.googleapis.com/drive/v3/files/${f.id}?alt=media&key=${apiKey}`,
+        size: parseInt(f.size, 10),
+        mimeType: f.mimeType
+      }));
+
+    if (files.length === 0) {
+      throw new Error("No valid files found in folder (all too large or empty)");
+    }
+
+    return files;
   }
 
-  throw new Error("Unrecognized Google Drive link");
+  throw new Error("Invalid Google Drive link. Use file or folder share links.");
 }
+
+// ------------------------------
+// CORS headers
+// ------------------------------
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization"
+};
 
 // ------------------------------
 // Main Worker
@@ -131,68 +279,324 @@ export default {
   async fetch(req, env) {
     const url = new URL(req.url);
 
-    // DO route
-    if (url.pathname.startsWith("/party/")) {
-      const id = url.pathname.split("/")[2];
-      const stub = env.PARTY.get(env.PARTY.idFromName(id));
-      return stub.fetch(req);
+    // Handle CORS preflight
+    if (req.method === "OPTIONS") {
+      return new Response(null, { 
+        status: 204,
+        headers: corsHeaders 
+      });
     }
 
-    // KV read
-    if (url.pathname.startsWith("/kv/") && req.method === "GET") {
-      const key = url.pathname.split("/")[2];
-      const val = await env.KV.get(key);
-      return new Response(val || "");
-    }
-
-    // KV write
-    if (url.pathname.startsWith("/kv/") && req.method === "POST") {
-      const key = url.pathname.split("/")[2];
-      const body = await req.text();
-      await env.KV.put(key, body);
-      return new Response("OK");
-    }
-
-    // Upload from remote storage
-    if (url.pathname === "/upload" && req.method === "POST") {
-      const body = await req.json();
-      const { storage_type, link } = body;
-
-      if (!storage_type || !link)
-        return new Response("Missing storage_type or link", { status: 400 });
-
-      const apiKey = await env.KV.get(storage_type);
-      if (!apiKey)
-        return new Response("Unknown storage type", { status: 400 });
-
-      let files;
-
-      if (storage_type === "GoogleDrive") {
-        files = await downloadFromGoogleDrive(apiKey, link);
-      } else {
-        return new Response("Unsupported storage type", { status: 400 });
+    try {
+      // ==========================================
+      // Durable Object Route (WebSocket sync)
+      // ==========================================
+      if (url.pathname.startsWith("/party/")) {
+        const roomId = url.pathname.split("/")[2];
+        if (!roomId) {
+          return new Response(
+            JSON.stringify({ error: "Missing room ID" }),
+            { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+        
+        const stub = env.PARTY.get(env.PARTY.idFromName(roomId));
+        return stub.fetch(req);
       }
 
-      const maxBytes = 10 * 1024 * 1024 * 1024;
-      const out = [];
-
-      for (const f of files) {
-        const dataRes = await fetch(f.url);
-        const dataBuf = await dataRes.arrayBuffer();
-
-        await enforceQuota(env.MEDIA, maxBytes);
-
-        await env.MEDIA.put(f.name, dataBuf);
-
-        out.push({
-          name: f.name,
-          url: `https://${env.ACCOUNT_ID}.r2.cloudflarestorage.com/${f.name}`
+      // ==========================================
+      // KV Read
+      // ==========================================
+      if (url.pathname.startsWith("/kv/") && req.method === "GET") {
+        const key = url.pathname.slice(4); // Remove "/kv/"
+        
+        if (!key) {
+          return new Response(
+            JSON.stringify({ error: "Missing key" }),
+            { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+        
+        const val = await env.KV.get(key);
+        
+        return new Response(val || "", { 
+          headers: { ...corsHeaders, "Content-Type": "text/plain" }
         });
       }
 
-      return new Response(JSON.stringify({ files: out }));
-    }
+      // ==========================================
+      // KV Write
+      // ==========================================
+      if (url.pathname.startsWith("/kv/") && req.method === "POST") {
+        const key = url.pathname.slice(4);
+        
+        if (!key) {
+          return new Response(
+            JSON.stringify({ error: "Missing key" }),
+            { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+        
+        const body = await req.text();
+        await env.KV.put(key, body);
+        
+        return new Response(
+          JSON.stringify({ success: true, key }),
+          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
 
-    return new Response("Worker active");
+      // ==========================================
+      // KV Delete
+      // ==========================================
+      if (url.pathname.startsWith("/kv/") && req.method === "DELETE") {
+        const key = url.pathname.slice(4);
+        
+        if (!key) {
+          return new Response(
+            JSON.stringify({ error: "Missing key" }),
+            { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+        
+        await env.KV.delete(key);
+        
+        return new Response(
+          JSON.stringify({ success: true, key }),
+          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+
+      // ==========================================
+      // Upload from Google Drive
+      // ==========================================
+      if (url.pathname === "/upload" && req.method === "POST") {
+        const body = await req.json();
+        const { storage_type, link } = body;
+
+        if (!storage_type || !link) {
+          return new Response(
+            JSON.stringify({ error: "Missing storage_type or link" }),
+            { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        // Get API key from KV
+        const apiKey = await env.KV.get(storage_type);
+        if (!apiKey) {
+          return new Response(
+            JSON.stringify({ 
+              error: `Storage type '${storage_type}' not configured. Set API key first.`,
+              hint: `POST /kv/${storage_type} with your API key`
+            }),
+            { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        // Get R2 public URL from KV
+        const publicUrl = await env.KV.get("R2_PUBLIC_URL");
+        if (!publicUrl) {
+          return new Response(
+            JSON.stringify({ 
+              error: "R2_PUBLIC_URL not configured",
+              hint: "This should be set during provisioning"
+            }),
+            { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        let files;
+
+        // Only Google Drive supported for now
+        if (storage_type === "GoogleDrive") {
+          files = await downloadFromGoogleDrive(apiKey, link);
+        } else {
+          return new Response(
+            JSON.stringify({ error: `Unsupported storage type: ${storage_type}` }),
+            { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        // Calculate total size
+        const totalSize = files.reduce((sum, f) => sum + (f.size || 0), 0);
+
+        // Check and enforce quota BEFORE downloading
+        const quotaResult = await enforceQuota(env.MEDIA, MAX_BUCKET_SIZE, totalSize);
+
+        const uploaded = [];
+        const errors = [];
+
+        // Download and upload each file
+        for (const f of files) {
+          try {
+            console.log(`Downloading ${f.name} (${(f.size / 1024 / 1024).toFixed(2)}MB)...`);
+            
+            // Stream download from Google Drive
+            const dataRes = await fetchWithRetry(f.url);
+            
+            if (!dataRes.ok) {
+              errors.push({ 
+                name: f.name, 
+                error: `Download failed: ${dataRes.status} ${dataRes.statusText}` 
+              });
+              continue;
+            }
+
+            // Stream upload to R2 (no memory buffering!)
+            await env.MEDIA.put(f.name, dataRes.body, {
+              httpMetadata: {
+                contentType: f.mimeType || "application/octet-stream"
+              }
+            });
+
+            console.log(`✓ Uploaded ${f.name}`);
+
+            uploaded.push({
+              name: f.name,
+              url: `${publicUrl}/${encodeURIComponent(f.name)}`,
+              size: f.size,
+              mimeType: f.mimeType
+            });
+
+          } catch (err) {
+            console.error(`Error uploading ${f.name}:`, err);
+            errors.push({ 
+              name: f.name, 
+              error: err.message 
+            });
+          }
+        }
+
+        return new Response(
+          JSON.stringify({
+            success: true,
+            files: uploaded,
+            errors: errors.length > 0 ? errors : undefined,
+            quota: {
+              deletedFiles: quotaResult.deletedCount,
+              freedSpaceMB: (quotaResult.freedSpace / 1024 / 1024).toFixed(2),
+              uploadedSizeMB: (totalSize / 1024 / 1024).toFixed(2)
+            }
+          }),
+          { 
+            status: 200,
+            headers: { ...corsHeaders, "Content-Type": "application/json" }
+          }
+        );
+      }
+
+      // ==========================================
+      // List uploaded files
+      // ==========================================
+      if (url.pathname === "/files" && req.method === "GET") {
+        const publicUrl = await env.KV.get("R2_PUBLIC_URL");
+        
+        const files = [];
+        let cursor;
+        
+        do {
+          const listed = await env.MEDIA.list({ limit: 1000, cursor });
+          
+          for (const obj of listed.objects) {
+            files.push({
+              name: obj.key,
+              url: `${publicUrl}/${encodeURIComponent(obj.key)}`,
+              size: obj.size,
+              uploaded: obj.uploaded.toISOString()
+            });
+          }
+          
+          cursor = listed.truncated ? listed.cursor : undefined;
+        } while (cursor);
+
+        return new Response(
+          JSON.stringify({
+            success: true,
+            count: files.length,
+            files,
+            totalSizeMB: (files.reduce((sum, f) => sum + f.size, 0) / 1024 / 1024).toFixed(2)
+          }),
+          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+
+      // ==========================================
+      // Delete file from R2
+      // ==========================================
+      if (url.pathname.startsWith("/files/") && req.method === "DELETE") {
+        const filename = decodeURIComponent(url.pathname.slice(7));
+        
+        if (!filename) {
+          return new Response(
+            JSON.stringify({ error: "Missing filename" }),
+            { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+
+        await env.MEDIA.delete(filename);
+
+        return new Response(
+          JSON.stringify({ 
+            success: true, 
+            deleted: filename 
+          }),
+          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+
+      // ==========================================
+      // Health check
+      // ==========================================
+      if (url.pathname === "/" || url.pathname === "/health") {
+        return new Response(
+          JSON.stringify({
+            status: "ok",
+            service: "StreamDeck Worker",
+            timestamp: new Date().toISOString(),
+            endpoints: {
+              upload: "POST /upload",
+              files: "GET /files",
+              deleteFile: "DELETE /files/{filename}",
+              kvGet: "GET /kv/{key}",
+              kvSet: "POST /kv/{key}",
+              kvDelete: "DELETE /kv/{key}",
+              party: "WS /party/{roomId}"
+            }
+          }),
+          { 
+            status: 200,
+            headers: { ...corsHeaders, "Content-Type": "application/json" }
+          }
+        );
+      }
+
+      // ==========================================
+      // 404 for unknown routes
+      // ==========================================
+      return new Response(
+        JSON.stringify({ 
+          error: "Not found",
+          path: url.pathname
+        }),
+        { 
+          status: 404,
+          headers: { ...corsHeaders, "Content-Type": "application/json" }
+        }
+      );
+
+    } catch (err) {
+      console.error("Worker error:", err);
+      
+      return new Response(
+        JSON.stringify({ 
+          error: err.message,
+          stack: process.env.NODE_ENV === "development" ? err.stack : undefined
+        }),
+        {
+          status: 500,
+          headers: { ...corsHeaders, "Content-Type": "application/json" }
+        }
+      );
+    }
   }
 };
