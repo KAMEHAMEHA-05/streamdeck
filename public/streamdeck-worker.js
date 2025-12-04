@@ -189,43 +189,66 @@ async function fetchWithRetry(url, retries = 3, headers = {}) {
 }
 
 // ------------------------------
-// Download from Google Drive
+// Download from Google Drive (no API key needed for public links)
 // ------------------------------
-async function downloadFromGoogleDrive(apiKey, link) {
+async function downloadFromGoogleDrive(link, apiKey = null) {
   const fileId = extractFileId(link);
   const folderId = extractFolderId(link);
 
   if (fileId) {
-    // Get file metadata first
-    const metaUrl = `https://www.googleapis.com/drive/v3/files/${fileId}?fields=name,size,mimeType&key=${apiKey}`;
+    // For public files, we can use direct download without API key
+    let downloadUrl;
+    let metaUrl;
     
-    const metaRes = await fetchWithRetry(metaUrl);
-    const meta = await metaRes.json();
-    
-    if (!meta.name) {
-      throw new Error("Unable to access file. Make sure it's shared as 'Anyone with the link'");
+    if (apiKey) {
+      // With API key - get metadata first
+      metaUrl = `https://www.googleapis.com/drive/v3/files/${fileId}?fields=name,size,mimeType&key=${apiKey}`;
+      downloadUrl = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&key=${apiKey}`;
+    } else {
+      // Without API key - direct download for public files
+      downloadUrl = `https://drive.google.com/uc?export=download&id=${fileId}`;
     }
     
-    // Validate file size
-    const size = parseInt(meta.size, 10);
-    if (size > MAX_FILE_SIZE) {
-      throw new Error(
-        `File too large: ${(size / 1024 / 1024).toFixed(2)}MB ` +
-        `(max ${MAX_FILE_SIZE / 1024 / 1024}MB)`
-      );
+    // Try to get metadata if we have API key
+    let name = `file_${fileId}`;
+    let size = 0;
+    let mimeType = "application/octet-stream";
+    
+    if (apiKey && metaUrl) {
+      try {
+        const metaRes = await fetchWithRetry(metaUrl);
+        if (metaRes.ok) {
+          const meta = await metaRes.json();
+          name = meta.name || name;
+          size = parseInt(meta.size, 10) || 0;
+          mimeType = meta.mimeType || mimeType;
+          
+          // Validate file size if we know it
+          if (size > MAX_FILE_SIZE) {
+            throw new Error(
+              `File too large: ${(size / 1024 / 1024).toFixed(2)}MB ` +
+              `(max ${MAX_FILE_SIZE / 1024 / 1024}MB)`
+            );
+          }
+        }
+      } catch (err) {
+        console.log("Could not fetch metadata, will try direct download:", err.message);
+      }
     }
 
-    const downloadUrl = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&key=${apiKey}`;
-    
     return [{
-      name: meta.name,
+      name,
       url: downloadUrl,
       size,
-      mimeType: meta.mimeType
+      mimeType
     }];
   }
 
   if (folderId) {
+    if (!apiKey) {
+      throw new Error("Google Drive API key required for folder downloads. Set it via POST /kv/GoogleDrive");
+    }
+    
     const listUrl = 
       `https://www.googleapis.com/drive/v3/files?` +
       `q='${folderId}'+in+parents+and+trashed=false&` +
@@ -381,17 +404,8 @@ export default {
           );
         }
 
-        // Get API key from KV
+        // Get API key from KV (optional for single file downloads)
         const apiKey = await env.KV.get(storage_type);
-        if (!apiKey) {
-          return new Response(
-            JSON.stringify({ 
-              error: `Storage type '${storage_type}' not configured. Set API key first.`,
-              hint: `POST /kv/${storage_type} with your API key`
-            }),
-            { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-          );
-        }
 
         // Get R2 public URL from KV
         const publicUrl = await env.KV.get("R2_PUBLIC_URL");
@@ -409,7 +423,7 @@ export default {
 
         // Only Google Drive supported for now
         if (storage_type === "GoogleDrive") {
-          files = await downloadFromGoogleDrive(apiKey, link);
+          files = await downloadFromGoogleDrive(link, apiKey);
         } else {
           return new Response(
             JSON.stringify({ error: `Unsupported storage type: ${storage_type}` }),
@@ -486,6 +500,31 @@ export default {
       }
 
       // ==========================================
+      // Debug endpoint
+      // ==========================================
+      if (url.pathname === "/debug" && req.method === "GET") {
+        const r2PublicUrl = await env.KV.get("R2_PUBLIC_URL");
+        
+        // List first few files
+        const listed = await env.MEDIA.list({ limit: 10 });
+        const files = listed.objects.map(obj => ({
+          key: obj.key,
+          size: obj.size
+        }));
+        
+        return new Response(
+          JSON.stringify({
+            workerUrl: url.origin,
+            r2PublicUrl,
+            filesInBucket: files,
+            requestedPath: url.pathname,
+            requestedHost: url.host
+          }, null, 2),
+          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+
+      // ==========================================
       // Serve media files from R2
       // ==========================================
       if (url.pathname.startsWith("/media/") && req.method === "GET") {
@@ -498,40 +537,87 @@ export default {
           );
         }
 
+        console.log(`Fetching file: ${filename}`);
+
         const obj = await env.MEDIA.get(filename);
         
         if (!obj) {
+          console.log(`File not found: ${filename}`);
           return new Response(
-            JSON.stringify({ error: "File not found" }),
+            JSON.stringify({ error: "File not found", filename }),
             { status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" } }
           );
         }
 
-        const headers = {
-          ...corsHeaders,
-          "Content-Type": obj.httpMetadata?.contentType || "application/octet-stream",
-          "Content-Length": obj.size,
-          "Cache-Control": "public, max-age=31536000, immutable",
-          "Accept-Ranges": "bytes"
-        };
+        console.log(`File found: ${filename}, size: ${obj.size}, type: ${obj.httpMetadata?.contentType}`);
+
+        // Determine content type
+        let contentType = obj.httpMetadata?.contentType || "application/octet-stream";
+        
+        // Force correct content type for common video formats
+        if (filename.endsWith('.mp4')) contentType = "video/mp4";
+        else if (filename.endsWith('.webm')) contentType = "video/webm";
+        else if (filename.endsWith('.mov')) contentType = "video/quicktime";
+        else if (filename.endsWith('.avi')) contentType = "video/x-msvideo";
 
         // Support range requests for video streaming
         const range = req.headers.get("Range");
         if (range) {
+          console.log(`Range request: ${range}`);
+          
           const parts = range.replace(/bytes=/, "").split("-");
           const start = parseInt(parts[0], 10);
           const end = parts[1] ? parseInt(parts[1], 10) : obj.size - 1;
-          const chunkSize = end - start + 1;
+          
+          // Validate range
+          if (isNaN(start) || start < 0 || start >= obj.size) {
+            return new Response("Invalid range", {
+              status: 416,
+              headers: {
+                ...corsHeaders,
+                "Content-Range": `bytes */${obj.size}`
+              }
+            });
+          }
 
-          headers["Content-Range"] = `bytes ${start}-${end}/${obj.size}`;
-          headers["Content-Length"] = chunkSize;
+          // Ensure end is within bounds
+          const validEnd = Math.min(end, obj.size - 1);
+          const chunkSize = validEnd - start + 1;
 
-          return new Response(obj.body, {
+          // Fetch the specific range from R2
+          const rangedObj = await env.MEDIA.get(filename, {
+            range: { offset: start, length: chunkSize }
+          });
+
+          if (!rangedObj) {
+            return new Response("Range not satisfiable", { status: 416, headers: corsHeaders });
+          }
+
+          const headers = {
+            ...corsHeaders,
+            "Content-Type": contentType,
+            "Content-Range": `bytes ${start}-${validEnd}/${obj.size}`,
+            "Content-Length": chunkSize.toString(),
+            "Accept-Ranges": "bytes",
+            "Cache-Control": "public, max-age=3600"
+          };
+
+          return new Response(rangedObj.body, {
             status: 206, // Partial Content
             headers
           });
         }
 
+        // Full file request
+        const headers = {
+          ...corsHeaders,
+          "Content-Type": contentType,
+          "Content-Length": obj.size.toString(),
+          "Cache-Control": "public, max-age=31536000, immutable",
+          "Accept-Ranges": "bytes"
+        };
+
+        console.log(`Serving full file: ${filename}`);
         return new Response(obj.body, { headers });
       }
 
