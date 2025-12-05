@@ -89,7 +89,7 @@ export class PartyDO {
 // Constants
 // ------------------------------
 const MAX_BUCKET_SIZE = 10 * 1024 * 1024 * 1024; // 10GB
-const MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024; // 2GB per file (reasonable for streaming)
+const MAX_FILE_SIZE = 10 * 1024 * 1024 * 1024; // 2GB per file (reasonable for streaming)
 
 // ------------------------------
 // Utilities
@@ -332,19 +332,29 @@ export default {
       // ==========================================
       if (url.pathname.startsWith("/kv/") && req.method === "GET") {
         const key = url.pathname.slice(4); // Remove "/kv/"
-        
-        if (!key) {
+        const body = await req.json();
+        const { access_key } = body;
+      
+        if (access_key != await env.KV.get("access_key")){
           return new Response(
-            JSON.stringify({ error: "Missing key" }),
-            { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+            JSON.stringify({ error: "Access key is incorrect" }),
+            { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } }
           );
+        }else{
+        
+          if (!key) {
+            return new Response(
+              JSON.stringify({ error: "Missing key" }),
+              { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+            );
+          }
+          
+          const val = await env.KV.get(key);
+          
+          return new Response(val || "", { 
+            headers: { ...corsHeaders, "Content-Type": "text/plain" }
+          });
         }
-        
-        const val = await env.KV.get(key);
-        
-        return new Response(val || "", { 
-          headers: { ...corsHeaders, "Content-Type": "text/plain" }
-        });
       }
 
       // ==========================================
@@ -352,21 +362,30 @@ export default {
       // ==========================================
       if (url.pathname.startsWith("/kv/") && req.method === "POST") {
         const key = url.pathname.slice(4);
-        
-        if (!key) {
+        const body = await req.json();
+        const { value, access_key } = body;
+
+        if (access_key != await env.KV.get("access_key")){
           return new Response(
-            JSON.stringify({ error: "Missing key" }),
-            { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+            JSON.stringify({ error: "Access key is incorrect" }),
+            { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }else{
+
+          if (!key) {
+            return new Response(
+              JSON.stringify({ error: "Missing key" }),
+              { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+            );
+          }
+          
+          await env.KV.put(key, value);
+          
+          return new Response(
+            JSON.stringify({ success: true, key }),
+            { headers: { ...corsHeaders, "Content-Type": "application/json" } }
           );
         }
-        
-        const body = await req.text();
-        await env.KV.put(key, body);
-        
-        return new Response(
-          JSON.stringify({ success: true, key }),
-          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-        );
       }
 
       // ==========================================
@@ -374,20 +393,29 @@ export default {
       // ==========================================
       if (url.pathname.startsWith("/kv/") && req.method === "DELETE") {
         const key = url.pathname.slice(4);
+        const body = await req.json();
+        const { access_key } = body;
         
-        if (!key) {
+        if (access_key != await env.KV.get("access_key")){
           return new Response(
-            JSON.stringify({ error: "Missing key" }),
-            { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+            JSON.stringify({ error: "Access key is incorrect" }),
+            { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }else{
+          if (!key) {
+            return new Response(
+              JSON.stringify({ error: "Missing key" }),
+              { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+            );
+          }
+          
+          await env.KV.delete(key);
+          
+          return new Response(
+            JSON.stringify({ success: true, key }),
+            { headers: { ...corsHeaders, "Content-Type": "application/json" } }
           );
         }
-        
-        await env.KV.delete(key);
-        
-        return new Response(
-          JSON.stringify({ success: true, key }),
-          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-        );
       }
 
       // ==========================================
@@ -395,108 +423,116 @@ export default {
       // ==========================================
       if (url.pathname === "/upload" && req.method === "POST") {
         const body = await req.json();
-        const { storage_type, link } = body;
+        const { storage_type, link, access_key } = body;
 
-        if (!storage_type || !link) {
+        if (access_key != await env.KV.get("access_key")){
           return new Response(
-            JSON.stringify({ error: "Missing storage_type or link" }),
-            { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+            JSON.stringify({ error: "Access key is incorrect" }),
+            { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } }
           );
-        }
+        }else{
 
-        // Get API key from KV (optional for single file downloads)
-        const apiKey = await env.KV.get(storage_type);
+          if (!storage_type || !link) {
+            return new Response(
+              JSON.stringify({ error: "Missing storage_type or link" }),
+              { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+            );
+          }
 
-        // Get R2 public URL from KV
-        const publicUrl = await env.KV.get("R2_PUBLIC_URL");
-        if (!publicUrl) {
-          return new Response(
-            JSON.stringify({ 
-              error: "R2_PUBLIC_URL not configured",
-              hint: "This should be set during provisioning"
-            }),
-            { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-          );
-        }
+          // Get API key from KV (optional for single file downloads)
+          const apiKey = await env.KV.get(storage_type);
 
-        let files;
+          // Get R2 public URL from KV
+          const publicUrl = await env.KV.get("R2_PUBLIC_URL");
+          if (!publicUrl) {
+            return new Response(
+              JSON.stringify({ 
+                error: "R2_PUBLIC_URL not configured",
+                hint: "This should be set during provisioning"
+              }),
+              { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+            );
+          }
 
-        // Only Google Drive supported for now
-        if (storage_type === "GoogleDrive") {
-          files = await downloadFromGoogleDrive(link, apiKey);
-        } else {
-          return new Response(
-            JSON.stringify({ error: `Unsupported storage type: ${storage_type}` }),
-            { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-          );
-        }
+          let files;
 
-        // Calculate total size
-        const totalSize = files.reduce((sum, f) => sum + (f.size || 0), 0);
+          // Only Google Drive supported for now
+          if (storage_type === "GoogleDrive") {
+            files = await downloadFromGoogleDrive(link, apiKey);
+          } else {
+            return new Response(
+              JSON.stringify({ error: `Unsupported storage type: ${storage_type}` }),
+              { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+            );
+          }
 
-        // Check and enforce quota BEFORE downloading
-        const quotaResult = await enforceQuota(env.MEDIA, MAX_BUCKET_SIZE, totalSize);
+          // Calculate total size
+          const totalSize = files.reduce((sum, f) => sum + (f.size || 0), 0);
 
-        const uploaded = [];
-        const errors = [];
+          // Check and enforce quota BEFORE downloading
+          const quotaResult = await enforceQuota(env.MEDIA, MAX_BUCKET_SIZE, totalSize);
 
-        // Download and upload each file
-        for (const f of files) {
-          try {
-            console.log(`Downloading ${f.name} (${(f.size / 1024 / 1024).toFixed(2)}MB)...`);
-            
-            // Stream download from Google Drive
-            const dataRes = await fetchWithRetry(f.url);
-            
-            if (!dataRes.ok) {
+          const uploaded = [];
+          const errors = [];
+
+          // Download and upload each file
+          for (const f of files) {
+            try {
+              console.log(`Downloading ${f.name} (${(f.size / 1024 / 1024).toFixed(2)}MB)...`);
+              
+              // Stream download from Google Drive
+              const dataRes = await fetchWithRetry(f.url);
+              
+              if (!dataRes.ok) {
+                errors.push({ 
+                  name: f.name, 
+                  error: `Download failed: ${dataRes.status} ${dataRes.statusText}` 
+                });
+                continue;
+              }
+
+              // Stream upload to R2 (no memory buffering!)
+              await env.MEDIA.put(f.name, dataRes.body, {
+                httpMetadata: {
+                  contentType: f.mimeType || "application/octet-stream"
+                }
+              });
+
+              console.log(`✓ Uploaded ${f.name}`);
+
+              uploaded.push({
+                name: f.name,
+                url: `${publicUrl}/${encodeURIComponent(f.name)}`,
+                size: f.size,
+                mimeType: f.mimeType
+              });
+
+            } catch (err) {
+              console.error(`Error uploading ${f.name}:`, err);
               errors.push({ 
                 name: f.name, 
-                error: `Download failed: ${dataRes.status} ${dataRes.statusText}` 
+                error: err.message 
               });
-              continue;
             }
+          }
 
-            // Stream upload to R2 (no memory buffering!)
-            await env.MEDIA.put(f.name, dataRes.body, {
-              httpMetadata: {
-                contentType: f.mimeType || "application/octet-stream"
+          return new Response(
+            JSON.stringify({
+              success: true,
+              files: uploaded,
+              errors: errors.length > 0 ? errors : undefined,
+              quota: {
+                deletedFiles: quotaResult.deletedCount,
+                freedSpaceMB: (quotaResult.freedSpace / 1024 / 1024).toFixed(2),
+                uploadedSizeMB: (totalSize / 1024 / 1024).toFixed(2)
               }
-            });
-
-            console.log(`✓ Uploaded ${f.name}`);
-
-            uploaded.push({
-              name: f.name,
-              url: `${publicUrl}/${encodeURIComponent(f.name)}`,
-              size: f.size,
-              mimeType: f.mimeType
-            });
-
-          } catch (err) {
-            console.error(`Error uploading ${f.name}:`, err);
-            errors.push({ 
-              name: f.name, 
-              error: err.message 
-            });
-          }
-        }
-
-        return new Response(
-          JSON.stringify({
-            success: true,
-            files: uploaded,
-            errors: errors.length > 0 ? errors : undefined,
-            quota: {
-              deletedFiles: quotaResult.deletedCount,
-              freedSpaceMB: (quotaResult.freedSpace / 1024 / 1024).toFixed(2),
-              uploadedSizeMB: (totalSize / 1024 / 1024).toFixed(2)
+            }),
+            { 
+              status: 200,
+              headers: { ...corsHeaders, "Content-Type": "application/json" }
             }
-          }),
-          { 
-            status: 200,
-            headers: { ...corsHeaders, "Content-Type": "application/json" }
-          }
-        );
+          );
+        }
       }
 
       // ==========================================
@@ -504,24 +540,35 @@ export default {
       // ==========================================
       if (url.pathname === "/debug" && req.method === "GET") {
         const r2PublicUrl = await env.KV.get("R2_PUBLIC_URL");
+        const body = await req.json();
+
+        const { access_key } = body;
+
+        if (access_key != await env.KV.get("access_key")){
+          return new Response(
+            JSON.stringify({ error: "Access key is incorrect" }),
+            { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }else{
         
-        // List first few files
-        const listed = await env.MEDIA.list({ limit: 10 });
-        const files = listed.objects.map(obj => ({
-          key: obj.key,
-          size: obj.size
-        }));
-        
-        return new Response(
-          JSON.stringify({
-            workerUrl: url.origin,
-            r2PublicUrl,
-            filesInBucket: files,
-            requestedPath: url.pathname,
-            requestedHost: url.host
-          }, null, 2),
-          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-        );
+          // List first few files
+          const listed = await env.MEDIA.list({ limit: 10 });
+          const files = listed.objects.map(obj => ({
+            key: obj.key,
+            size: obj.size
+          }));
+          
+          return new Response(
+            JSON.stringify({
+              workerUrl: url.origin,
+              r2PublicUrl,
+              filesInBucket: files,
+              requestedPath: url.pathname,
+              requestedHost: url.host
+            }, null, 2),
+            { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
       }
 
       // ==========================================
@@ -626,41 +673,52 @@ export default {
       // ==========================================
       if (url.pathname === "/files" && req.method === "GET") {
         const publicUrl = await env.KV.get("R2_PUBLIC_URL");
-        
-        if (!publicUrl) {
+        const body = await req.json();
+
+        const { access_key } = body;
+
+        if (access_key != await env.KV.get("access_key")){
           return new Response(
-            JSON.stringify({ error: "R2_PUBLIC_URL not configured" }),
-            { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+            JSON.stringify({ error: "Access key is incorrect" }),
+            { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } }
           );
-        }
+        }else{
         
-        const files = [];
-        let cursor;
-        
-        do {
-          const listed = await env.MEDIA.list({ limit: 1000, cursor });
-          
-          for (const obj of listed.objects) {
-            files.push({
-              name: obj.key,
-              url: `${publicUrl}/${encodeURIComponent(obj.key)}`,
-              size: obj.size,
-              uploaded: obj.uploaded.toISOString()
-            });
+          if (!publicUrl) {
+            return new Response(
+              JSON.stringify({ error: "R2_PUBLIC_URL not configured" }),
+              { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+            );
           }
           
-          cursor = listed.truncated ? listed.cursor : undefined;
-        } while (cursor);
+          const files = [];
+          let cursor;
+          
+          do {
+            const listed = await env.MEDIA.list({ limit: 1000, cursor });
+            
+            for (const obj of listed.objects) {
+              files.push({
+                name: obj.key,
+                url: `${publicUrl}/${encodeURIComponent(obj.key)}`,
+                size: obj.size,
+                uploaded: obj.uploaded.toISOString()
+              });
+            }
+            
+            cursor = listed.truncated ? listed.cursor : undefined;
+          } while (cursor);
 
-        return new Response(
-          JSON.stringify({
-            success: true,
-            count: files.length,
-            files,
-            totalSizeMB: (files.reduce((sum, f) => sum + f.size, 0) / 1024 / 1024).toFixed(2)
-          }),
-          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-        );
+          return new Response(
+            JSON.stringify({
+              success: true,
+              count: files.length,
+              files,
+              totalSizeMB: (files.reduce((sum, f) => sum + f.size, 0) / 1024 / 1024).toFixed(2)
+            }),
+            { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
       }
 
       // ==========================================
@@ -668,23 +726,34 @@ export default {
       // ==========================================
       if (url.pathname.startsWith("/files/") && req.method === "DELETE") {
         const filename = decodeURIComponent(url.pathname.slice(7));
-        
-        if (!filename) {
+        const body = await req.json();
+
+        const { access_key } = body;
+
+        if (access_key != await env.KV.get("access_key")){
           return new Response(
-            JSON.stringify({ error: "Missing filename" }),
-            { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+            JSON.stringify({ error: "Access key is incorrect" }),
+            { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }else{
+        
+          if (!filename) {
+            return new Response(
+              JSON.stringify({ error: "Missing filename" }),
+              { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+            );
+          }
+
+          await env.MEDIA.delete(filename);
+
+          return new Response(
+            JSON.stringify({ 
+              success: true, 
+              deleted: filename 
+            }),
+            { headers: { ...corsHeaders, "Content-Type": "application/json" } }
           );
         }
-
-        await env.MEDIA.delete(filename);
-
-        return new Response(
-          JSON.stringify({ 
-            success: true, 
-            deleted: filename 
-          }),
-          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-        );
       }
 
       // ==========================================
