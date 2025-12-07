@@ -264,8 +264,8 @@ export default async function handler(req) {
         {
           name: "PARTY",
           type: "durable_object_namespace",
-          namespace_id: doId,
-          class_name: doClass
+          namespace_id: doId
+          // Note: Do NOT include class_name here, it's inferred from the namespace
         }
       ]
     });
