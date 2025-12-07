@@ -12,7 +12,7 @@ async function cf(apiToken, method, url, body) {
     },
     body: body ? JSON.stringify(body) : undefined
   });
-  
+
   const json = await res.json();
   if (!json.success) {
     throw new Error(`CF API Error: ${JSON.stringify(json.errors)}`);
@@ -72,11 +72,13 @@ async function deployWorker(apiToken, accountId, workerName, workerSource, metad
 
 export default async function handler(req) {
   try {
-    const { accountId, apiToken } = await req.json();
-    
-    if (!accountId || !apiToken) {
+    const { accountId, apiToken, access_token, userEmail } = await req.json();
+
+    if (!accountId || !apiToken || !access_token || !userEmail) {
       return new Response(
-        JSON.stringify({ error: "Missing accountId or apiToken" }),
+        JSON.stringify({
+          error: "Missing required fields: accountId, apiToken, access_token, userEmail"
+        }),
         { status: 400, headers: { "Content-Type": "application/json" } }
       );
     }
@@ -92,27 +94,19 @@ export default async function handler(req) {
     // STEP 1: Create R2 Bucket
     // ==========================================
     console.log("Creating R2 bucket...");
-    
     try {
       await cf(apiToken, "POST",
         `${CF}/accounts/${accountId}/r2/buckets`,
         { name: bucketName, locationHint: "auto" }
       );
     } catch (err) {
-      // Bucket might already exist, that's okay
       if (!err.message.includes("already exists")) throw err;
     }
-
-    // R2 public access is configured via custom domains in the dashboard
-    // We'll serve files through the worker instead for simplicity
-    // This gives us control over CORS and doesn't require domain setup
-    const publicUrl = `https://${workerName}.${accountId}.workers.dev/media`;
 
     // ==========================================
     // STEP 2: Create KV Namespace
     // ==========================================
     console.log("Creating KV namespace...");
-    
     let kvId;
     try {
       const kv = await cf(apiToken, "POST",
@@ -121,7 +115,6 @@ export default async function handler(req) {
       );
       kvId = kv.id;
     } catch (err) {
-      // If exists, get existing ID
       const namespaces = await cf(apiToken, "GET",
         `${CF}/accounts/${accountId}/storage/kv/namespaces`
       );
@@ -131,10 +124,25 @@ export default async function handler(req) {
     }
 
     // ==========================================
-    // STEP 3: Load Worker Source
+    // STEP 3: Store ACCESS TOKEN in KV
+    // ==========================================
+    console.log("Storing access_token in KV...");
+    await fetch(
+      `${CF}/accounts/${accountId}/storage/kv/namespaces/${kvId}/values/access_token`,
+      {
+        method: "PUT",
+        headers: {
+          Authorization: `Bearer ${apiToken}`,
+          "Content-Type": "text/plain"
+        },
+        body: access_token
+      }
+    );
+
+    // ==========================================
+    // STEP 4: Load Worker Source
     // ==========================================
     console.log("Loading worker source...");
-    
     const url = new URL(req.url);
     const origin = `${url.protocol}//${url.host}`;
     const workerSource = await fetch(`${origin}/streamdeck-worker.js`)
@@ -144,10 +152,9 @@ export default async function handler(req) {
       });
 
     // ==========================================
-    // STEP 4: Deploy Worker (without DO binding)
+    // STEP 5: Deploy Worker (no DO binding yet)
     // ==========================================
     console.log("Deploying worker (initial)...");
-    
     const metadata1 = JSON.stringify({
       main_module: "worker.js",
       compatibility_date: "2024-01-01",
@@ -161,10 +168,9 @@ export default async function handler(req) {
     await deployWorker(apiToken, accountId, workerName, workerSource, metadata1);
 
     // ==========================================
-    // STEP 5: Create Durable Object Namespace
+    // STEP 6: Create Durable Object Namespace
     // ==========================================
     console.log("Creating Durable Object namespace...");
-    
     let doId;
     try {
       const doResult = await cf(apiToken, "POST",
@@ -177,7 +183,6 @@ export default async function handler(req) {
       );
       doId = doResult.id;
     } catch (err) {
-      // If exists, get existing ID
       const namespaces = await cf(apiToken, "GET",
         `${CF}/accounts/${accountId}/workers/durable_objects/namespaces`
       );
@@ -187,10 +192,9 @@ export default async function handler(req) {
     }
 
     // ==========================================
-    // STEP 6: Re-deploy Worker (with DO binding)
+    // STEP 7: Redeploy Worker (with DO binding)
     // ==========================================
     console.log("Re-deploying worker with DO binding...");
-    
     const metadata2 = JSON.stringify({
       main_module: "worker.js",
       compatibility_date: "2024-01-01",
@@ -198,36 +202,56 @@ export default async function handler(req) {
       bindings: [
         { name: "MEDIA", type: "r2_bucket", bucket_name: bucketName },
         { name: "KV", type: "kv_namespace", namespace_id: kvId },
-        { name: "PARTY", type: "durable_object_namespace", namespace_id: doId }
+        {
+          name: "PARTY",
+          type: "durable_object_namespace",
+          namespace_id: doId,
+          class_name: doClass
+        }
       ]
     });
 
     await deployWorker(apiToken, accountId, workerName, workerSource, metadata2);
 
     // ==========================================
-    // STEP 7: Store R2 Public URL in KV
+    // STEP 8: Enable workers.dev SUBDOMAIN
     // ==========================================
-    console.log("Storing R2 public URL in KV...");
-    
-    await fetch(
-      `${CF}/accounts/${accountId}/storage/kv/namespaces/${kvId}/values/R2_PUBLIC_URL`,
-      {
-        method: "PUT",
-        headers: {
-          Authorization: `Bearer ${apiToken}`,
-          "Content-Type": "text/plain"
-        },
-        body: publicUrl
+    console.log("Ensuring workers.dev subdomain is enabled...");
+    const preferred = userEmail.split("@")[0];
+    let subdomain;
+
+    try {
+      const existing = await cf(apiToken, "GET",
+        `${CF}/accounts/${accountId}/workers/subdomain`
+      );
+      subdomain = existing.subdomain;
+    } catch (_) {
+      // no subdomain yet
+    }
+
+    if (!subdomain) {
+      try {
+        const result = await cf(apiToken, "PUT",
+          `${CF}/accounts/${accountId}/workers/subdomain?subdomain=${preferred}`
+        );
+        subdomain = result.subdomain;
+      } catch {
+        const fallback = `cf-${Math.random().toString(36).slice(2, 8)}`;
+        const result = await cf(apiToken, "PUT",
+          `${CF}/accounts/${accountId}/workers/subdomain?subdomain=${fallback}`
+        );
+        subdomain = result.subdomain;
       }
-    );
+    }
+
+    console.log("Using subdomain:", subdomain);
+
+    const workerUrl = `https://${workerName}.${subdomain}.workers.dev`;
+    const publicUrl = `${workerUrl}/media`;
 
     // ==========================================
-    // SUCCESS
+    // SUCCESS RESPONSE
     // ==========================================
-    const workerUrl = `https://${workerName}.${accountId}.workers.dev`;
-
-    console.log("Provisioning complete!");
-
     return new Response(
       JSON.stringify({
         success: true,
@@ -236,6 +260,7 @@ export default async function handler(req) {
         bucketName,
         kvNamespaceId: kvId,
         doNamespaceId: doId,
+        workersDevSubdomain: subdomain,
         setup: {
           step1: "Store your Google Drive API key",
           command1: `curl -X POST ${workerUrl}/kv/GoogleDrive -H "Content-Type: text/plain" -d "YOUR_API_KEY"`,
@@ -244,11 +269,10 @@ export default async function handler(req) {
           step3: "Files will be accessible at",
           url: `${publicUrl}/YOUR_FILENAME`,
           step4: "Connect to sync party via WebSocket",
-          ws: `wss://${workerUrl.replace('https://', '')}/party/ROOM_NAME`
-        },
-        note: "Files are served through the worker endpoint with proper CORS and range request support for video streaming"
+          ws: `wss://${workerName}.${subdomain}.workers.dev/party/ROOM_NAME`
+        }
       }, null, 2),
-      { 
+      {
         status: 200,
         headers: { "Content-Type": "application/json" }
       }
@@ -256,7 +280,7 @@ export default async function handler(req) {
 
   } catch (err) {
     console.error("Provisioning error:", err);
-    
+
     return new Response(
       JSON.stringify({
         error: err.message,
