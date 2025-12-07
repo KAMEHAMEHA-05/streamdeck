@@ -291,6 +291,23 @@ export default async function handler(req) {
     const mediaUrl = `${workerUrl}/media`;
 
     /* ---------------------------------------------
+       STEP 9: Store R2_PUBLIC_URL in KV
+    --------------------------------------------- */
+    console.log("Storing R2_PUBLIC_URL in KV...");
+    
+    await fetch(
+      `${CF}/accounts/${accountId}/storage/kv/namespaces/${kvId}/values/R2_PUBLIC_URL`,
+      {
+        method: "PUT",
+        headers: {
+          Authorization: `Bearer ${apiToken}`,
+          "Content-Type": "text/plain"
+        },
+        body: mediaUrl
+      }
+    );
+
+    /* ---------------------------------------------
        SUCCESS
     --------------------------------------------- */
     return new Response(
