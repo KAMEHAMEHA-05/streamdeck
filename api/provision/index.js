@@ -79,16 +79,28 @@ async function deployWorker(apiToken, accountId, workerName, workerSource, metad
 --------------------------------------------- */
 
 async function findAvailableName(existingListFn, baseName, extractName) {
-  const list = await existingListFn();
-  const names = list.map(extractName);
+  try {
+    const list = await existingListFn();
+    
+    // Ensure list is an array
+    if (!Array.isArray(list)) {
+      console.log(`List is not array for ${baseName}, using base name`);
+      return baseName;
+    }
+    
+    const names = list.map(extractName);
 
-  if (!names.includes(baseName)) return baseName;
+    if (!names.includes(baseName)) return baseName;
 
-  let suffix = 1;
-  while (names.includes(`${baseName}${suffix}`)) {
-    suffix++;
+    let suffix = 1;
+    while (names.includes(`${baseName}${suffix}`)) {
+      suffix++;
+    }
+    return `${baseName}${suffix}`;
+  } catch (err) {
+    console.log(`Error finding available name for ${baseName}:`, err.message);
+    return baseName; // Fall back to base name
   }
-  return `${baseName}${suffix}`;
 }
 
 /* ---------------------------------------------
