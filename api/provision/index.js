@@ -3,6 +3,10 @@ export const config = { runtime: "edge" };
 
 const CF = "https://api.cloudflare.com/client/v4";
 
+/* ---------------------------------------------
+   BASIC CF HELPERS
+--------------------------------------------- */
+
 async function cf(apiToken, method, url, body) {
   const res = await fetch(url, {
     method,
@@ -70,6 +74,27 @@ async function deployWorker(apiToken, accountId, workerName, workerSource, metad
   return json.result;
 }
 
+/* ---------------------------------------------
+   NAME-CONFLICT RESOLVER
+--------------------------------------------- */
+
+async function findAvailableName(existingListFn, baseName, extractName) {
+  const list = await existingListFn();
+  const names = list.map(extractName);
+
+  if (!names.includes(baseName)) return baseName;
+
+  let suffix = 1;
+  while (names.includes(`${baseName}${suffix}`)) {
+    suffix++;
+  }
+  return `${baseName}${suffix}`;
+}
+
+/* ---------------------------------------------
+   MAIN HANDLER
+--------------------------------------------- */
+
 export default async function handler(req) {
   try {
     const { accountId, apiToken, access_token, userEmail } = await req.json();
@@ -83,17 +108,43 @@ export default async function handler(req) {
       );
     }
 
-    const bucketName = "streamdeck-media";
-    const workerName = "streamdeck-worker";
-    const kvName = "streamdeck-kv";
-    const doClass = "PartyDO";
-
     console.log("Starting provisioning...");
 
-    // ==========================================
-    // STEP 1: Create R2 Bucket
-    // ==========================================
-    console.log("Creating R2 bucket...");
+    /* ---------------------------------------------
+       STEP 0: Generate non-conflicting names
+    --------------------------------------------- */
+
+    const bucketName = await findAvailableName(
+      async () => await cf(apiToken, "GET", `${CF}/accounts/${accountId}/r2/buckets`),
+      "streamdeck-media",
+      (b) => b.name
+    );
+
+    const kvName = await findAvailableName(
+      async () => await cf(apiToken, "GET", `${CF}/accounts/${accountId}/storage/kv/namespaces`),
+      "streamdeck-kv",
+      (ns) => ns.title
+    );
+
+    const workerName = await findAvailableName(
+      async () => await cf(apiToken, "GET", `${CF}/accounts/${accountId}/workers/scripts`),
+      "streamdeck-worker",
+      (s) => s.id
+    );
+
+    const doNamespaceName = await findAvailableName(
+      async () => await cf(apiToken, "GET", `${CF}/accounts/${accountId}/workers/durable_objects/namespaces`),
+      "PARTY",
+      (ns) => ns.name
+    );
+
+    const doClass = "PartyDO";
+
+    /* ---------------------------------------------
+       STEP 1: Create R2 bucket
+    --------------------------------------------- */
+    console.log("Creating R2 bucket:", bucketName);
+
     try {
       await cf(apiToken, "POST",
         `${CF}/accounts/${accountId}/r2/buckets`,
@@ -103,10 +154,12 @@ export default async function handler(req) {
       if (!err.message.includes("already exists")) throw err;
     }
 
-    // ==========================================
-    // STEP 2: Create KV Namespace
-    // ==========================================
-    console.log("Creating KV namespace...");
+
+    /* ---------------------------------------------
+       STEP 2: Create KV namespace
+    --------------------------------------------- */
+    console.log("Creating KV namespace:", kvName);
+
     let kvId;
     try {
       const kv = await cf(apiToken, "POST",
@@ -114,19 +167,17 @@ export default async function handler(req) {
         { title: kvName }
       );
       kvId = kv.id;
-    } catch (err) {
+    } catch {
       const namespaces = await cf(apiToken, "GET",
-        `${CF}/accounts/${accountId}/storage/kv/namespaces`
-      );
-      const existing = namespaces.find(ns => ns.title === kvName);
-      if (!existing) throw err;
-      kvId = existing.id;
+        `${CF}/accounts/${accountId}/storage/kv/namespaces`);
+      kvId = namespaces.find(ns => ns.title === kvName).id;
     }
 
-    // ==========================================
-    // STEP 3: Store ACCESS TOKEN in KV
-    // ==========================================
+    /* ---------------------------------------------
+       STEP 3: Store access token in KV
+    --------------------------------------------- */
     console.log("Storing access_token in KV...");
+
     await fetch(
       `${CF}/accounts/${accountId}/storage/kv/namespaces/${kvId}/values/access_token`,
       {
@@ -139,22 +190,19 @@ export default async function handler(req) {
       }
     );
 
-    // ==========================================
-    // STEP 4: Load Worker Source
-    // ==========================================
+    /* ---------------------------------------------
+       STEP 4: Load worker source
+    --------------------------------------------- */
     console.log("Loading worker source...");
     const url = new URL(req.url);
     const origin = `${url.protocol}//${url.host}`;
-    const workerSource = await fetch(`${origin}/streamdeck-worker.js`)
-      .then(r => {
-        if (!r.ok) throw new Error("Failed to load worker source");
-        return r.text();
-      });
+    const workerSource = await fetch(`${origin}/streamdeck-worker.js`).then(r => r.text());
 
-    // ==========================================
-    // STEP 5: Deploy Worker (no DO binding yet)
-    // ==========================================
-    console.log("Deploying worker (initial)...");
+    /* ---------------------------------------------
+       STEP 5: Deploy worker without DO binding
+    --------------------------------------------- */
+    console.log("Deploying worker (initial):", workerName);
+
     const metadata1 = JSON.stringify({
       main_module: "worker.js",
       compatibility_date: "2024-01-01",
@@ -167,34 +215,33 @@ export default async function handler(req) {
 
     await deployWorker(apiToken, accountId, workerName, workerSource, metadata1);
 
-    // ==========================================
-    // STEP 6: Create Durable Object Namespace
-    // ==========================================
-    console.log("Creating Durable Object namespace...");
+    /* ---------------------------------------------
+       STEP 6: Create Durable Object namespace
+    --------------------------------------------- */
+    console.log("Creating DO namespace:", doNamespaceName);
+
     let doId;
     try {
       const doResult = await cf(apiToken, "POST",
         `${CF}/accounts/${accountId}/workers/durable_objects/namespaces`,
         {
-          name: "PARTY",
+          name: doNamespaceName,
           script_name: workerName,
           class_name: doClass
         }
       );
       doId = doResult.id;
-    } catch (err) {
-      const namespaces = await cf(apiToken, "GET",
-        `${CF}/accounts/${accountId}/workers/durable_objects/namespaces`
-      );
-      const existing = namespaces.find(ns => ns.class === doClass);
-      if (!existing) throw err;
-      doId = existing.id;
+    } catch {
+      const list = await cf(apiToken, "GET",
+        `${CF}/accounts/${accountId}/workers/durable_objects/namespaces`);
+      doId = list.find(n => n.name === doNamespaceName).id;
     }
 
-    // ==========================================
-    // STEP 7: Redeploy Worker (with DO binding)
-    // ==========================================
-    console.log("Re-deploying worker with DO binding...");
+    /* ---------------------------------------------
+       STEP 7: Re-deploy worker with DO binding
+    --------------------------------------------- */
+    console.log("Redeploying worker with DO binding...");
+
     const metadata2 = JSON.stringify({
       main_module: "worker.js",
       compatibility_date: "2024-01-01",
@@ -213,83 +260,63 @@ export default async function handler(req) {
 
     await deployWorker(apiToken, accountId, workerName, workerSource, metadata2);
 
-    // ==========================================
-    // STEP 8: Enable workers.dev SUBDOMAIN
-    // ==========================================
-    console.log("Ensuring workers.dev subdomain is enabled...");
+    /* ---------------------------------------------
+       STEP 8: Ensure workers.dev subdomain
+    --------------------------------------------- */
+
     const preferred = userEmail.split("@")[0];
     let subdomain;
 
     try {
-      const existing = await cf(apiToken, "GET",
-        `${CF}/accounts/${accountId}/workers/subdomain`
-      );
-      subdomain = existing.subdomain;
-    } catch (_) {
-      // no subdomain yet
-    }
+      subdomain = (await cf(apiToken, "GET",
+        `${CF}/accounts/${accountId}/workers/subdomain`)).subdomain;
+    } catch {}
 
     if (!subdomain) {
       try {
-        const result = await cf(apiToken, "PUT",
+        subdomain = (await cf(apiToken, "PUT",
           `${CF}/accounts/${accountId}/workers/subdomain?subdomain=${preferred}`
-        );
-        subdomain = result.subdomain;
+        )).subdomain;
       } catch {
         const fallback = `cf-${Math.random().toString(36).slice(2, 8)}`;
-        const result = await cf(apiToken, "PUT",
+        subdomain = (await cf(apiToken, "PUT",
           `${CF}/accounts/${accountId}/workers/subdomain?subdomain=${fallback}`
-        );
-        subdomain = result.subdomain;
+        )).subdomain;
       }
     }
 
     console.log("Using subdomain:", subdomain);
 
     const workerUrl = `https://${workerName}.${subdomain}.workers.dev`;
-    const publicUrl = `${workerUrl}/media`;
+    const mediaUrl = `${workerUrl}/media`;
 
-    // ==========================================
-    // SUCCESS RESPONSE
-    // ==========================================
+    /* ---------------------------------------------
+       SUCCESS
+    --------------------------------------------- */
     return new Response(
       JSON.stringify({
         success: true,
         workerUrl,
-        mediaUrl: publicUrl,
-        bucketName,
-        kvNamespaceId: kvId,
-        doNamespaceId: doId,
-        workersDevSubdomain: subdomain,
-        setup: {
-          step1: "Store your Google Drive API key",
-          command1: `curl -X POST ${workerUrl}/kv/GoogleDrive -H "Content-Type: text/plain" -d "YOUR_API_KEY"`,
-          step2: "Upload files from Google Drive",
-          command2: `curl -X POST ${workerUrl}/upload -H "Content-Type: application/json" -d '{"storage_type":"GoogleDrive","link":"YOUR_DRIVE_LINK"}'`,
-          step3: "Files will be accessible at",
-          url: `${publicUrl}/YOUR_FILENAME`,
-          step4: "Connect to sync party via WebSocket",
-          ws: `wss://${workerName}.${subdomain}.workers.dev/party/ROOM_NAME`
+        mediaUrl,
+        names: {
+          bucketName,
+          kvName,
+          workerName,
+          doNamespaceName
+        },
+        ids: {
+          kvId,
+          doId
         }
       }, null, 2),
-      {
-        status: 200,
-        headers: { "Content-Type": "application/json" }
-      }
+      { status: 200, headers: { "Content-Type": "application/json" } }
     );
 
   } catch (err) {
-    console.error("Provisioning error:", err);
-
+    console.error(err);
     return new Response(
-      JSON.stringify({
-        error: err.message,
-        stack: err.stack
-      }),
-      {
-        status: 500,
-        headers: { "Content-Type": "application/json" }
-      }
+      JSON.stringify({ error: err.message }),
+      { status: 500, headers: { "Content-Type": "application/json" } }
     );
   }
 }
