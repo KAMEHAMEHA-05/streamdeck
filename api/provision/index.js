@@ -7,6 +7,11 @@ const CF = "https://api.cloudflare.com/client/v4";
    BASIC CF HELPERS
 --------------------------------------------- */
 
+function randomSecret() {
+  return crypto.randomUUID().replace(/-/g, "") + crypto.randomUUID().replace(/-/g, "")
+}
+
+
 async function cf(apiToken, method, url, body) {
   const res = await fetch(url, {
     method,
@@ -110,6 +115,8 @@ async function findAvailableName(existingListFn, baseName, extractName) {
 export default async function handler(req) {
   try {
     const { accountId, apiToken, access_token, userEmail } = await req.json();
+    const jwtSecret = randomSecret()
+
 
     if (!accountId || !apiToken || !access_token || !userEmail) {
       return new Response(
@@ -185,22 +192,24 @@ export default async function handler(req) {
       kvId = namespaces.find(ns => ns.title === kvName).id;
     }
 
-    /* ---------------------------------------------
-       STEP 3: Store access token in KV
-    --------------------------------------------- */
-    console.log("Storing access_token in KV...");
+    // /* ---------------------------------------------
+    //    STEP 3: Store access token in KV
+    // --------------------------------------------- */
+    // console.log("Storing access_token in KV...");
 
-    await fetch(
-      `${CF}/accounts/${accountId}/storage/kv/namespaces/${kvId}/values/access_token`,
-      {
-        method: "PUT",
-        headers: {
-          Authorization: `Bearer ${apiToken}`,
-          "Content-Type": "text/plain"
-        },
-        body: access_token
-      }
-    );
+    // await fetch(
+    //   `${CF}/accounts/${accountId}/storage/kv/namespaces/${kvId}/values/access_token`,
+    //   {
+    //     method: "PUT",
+    //     headers: {
+    //       Authorization: `Bearer ${apiToken}`,
+    //       "Content-Type": "text/plain"
+    //     },
+    //     body: access_token
+    //   }
+    // );
+
+
 
     /* ---------------------------------------------
        STEP 4: Load worker source
@@ -221,9 +230,13 @@ export default async function handler(req) {
       compatibility_flags: ["nodejs_compat"],
       bindings: [
         { name: "MEDIA", type: "r2_bucket", bucket_name: bucketName },
-        { name: "KV", type: "kv_namespace", namespace_id: kvId }
+        { name: "KV", type: "kv_namespace", namespace_id: kvId },
+
+        { name: "ACCESS_KEY", type: "plain_text", text: access_token },
+        { name: "JWT_SECRET", type: "plain_text", text: jwtSecret }
       ]
     });
+
 
     await deployWorker(apiToken, accountId, workerName, workerSource, metadata1);
 
@@ -265,10 +278,13 @@ export default async function handler(req) {
           name: "PARTY",
           type: "durable_object_namespace",
           namespace_id: doId
-          // Note: Do NOT include class_name here, it's inferred from the namespace
-        }
+        },
+
+        { name: "ACCESS_KEY", type: "plain_text", text: access_token },
+        { name: "JWT_SECRET", type: "plain_text", text: jwtSecret }
       ]
     });
+
 
     await deployWorker(apiToken, accountId, workerName, workerSource, metadata2);
 
