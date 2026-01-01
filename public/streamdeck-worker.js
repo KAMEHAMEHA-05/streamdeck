@@ -103,6 +103,16 @@ export class PartyDO {
   }
 
   async fetch(request) {
+
+    const auth = request.headers.get("Authorization")
+    const jwt = auth?.replace("Bearer ","")
+    const user = await verifyJWT(jwt, this.env)
+
+    if (user.role !== "party" || user.room !== roomId) {
+      return new Response("Forbidden", { status: 403 })
+    }
+
+
     if (!this.initialized) {
       this.initialized = true;
       await this.init();
@@ -1102,6 +1112,24 @@ export default {
         );
 
       }
+
+      // ==========================================
+      // Party token generation
+      // ==========================================
+
+      if (url.pathname === "/party-token" && req.method === "POST") {
+        const admin = await requireRole(req, env, "admin")
+        const { room } = await req.json()
+
+        const token = await signJWT(
+          { role: "party", room, perms:["stream"] },
+          env,
+          3600
+        )
+
+        return new Response(JSON.stringify({ token }))
+      }
+
 
       // ==========================================
       // Health check
