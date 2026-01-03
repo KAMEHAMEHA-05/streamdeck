@@ -112,6 +112,7 @@ export class PartyDO {
       return new Response("Forbidden", { status: 403 })
     }
 
+    
 
     if (!this.initialized) {
       this.initialized = true;
