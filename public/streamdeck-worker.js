@@ -118,7 +118,6 @@ export class PartyDO {
       await this.init();
     }
 
-    
     const upgradeHeader = request.headers.get("Upgrade");
     if (upgradeHeader !== "websocket") {
       return new Response("Expected websocket", { status: 426 });
